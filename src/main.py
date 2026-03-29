@@ -108,10 +108,10 @@ def extract_code_from_qr_text(text: str) -> str:
     return ""
 
 
-def extract_code_from_first_page(page: fitz.Page) -> tuple[str, str]:
+def extract_code_from_page(page: fitz.Page) -> tuple[str, str]:
     """
-    1페이지 우측 QR 코드에서 파일명을 만들 코드를 추출
-    예: @H2312603706@ -> H2312603706
+    Extract the filename code from a QR page.
+    Example: @H2312603706@ -> H2312603706
     """
     detector = cv2.QRCodeDetector()
     best_raw_text = ""
@@ -132,6 +132,11 @@ def extract_code_from_first_page(page: fitz.Page) -> tuple[str, str]:
     return "", best_raw_text
 
 
+def extract_code_from_first_page(page: fitz.Page) -> tuple[str, str]:
+    """Backward-compatible wrapper."""
+    return extract_code_from_page(page)
+
+
 def code_to_filename(code: str) -> str:
     sanitized = re.sub(r'[<>:"/\\\\|?*]+', "_", code.strip())
     sanitized = sanitized.rstrip(". ")
@@ -140,13 +145,25 @@ def code_to_filename(code: str) -> str:
     return sanitized
 
 
-def save_pdf_without_first_page(doc: fitz.Document, output_pdf: Path) -> None:
+def save_pdf_page_range(
+    doc: fitz.Document,
+    start_page: int,
+    end_page: int,
+    output_pdf: Path,
+) -> None:
+    if start_page > end_page:
+        raise ValueError("start_page must be less than or equal to end_page.")
+
     output_doc = fitz.open()
     try:
-        output_doc.insert_pdf(doc, from_page=1, to_page=doc.page_count - 1)
+        output_doc.insert_pdf(doc, from_page=start_page, to_page=end_page)
         output_doc.save(output_pdf, garbage=4, deflate=True)
     finally:
         output_doc.close()
+
+
+def save_pdf_without_first_page(doc: fitz.Document, output_pdf: Path) -> None:
+    save_pdf_page_range(doc, 1, doc.page_count - 1, output_pdf)
 
 
 def build_unique_output_path(output_dir: Path, filename: str) -> Path:
@@ -162,6 +179,17 @@ def build_unique_output_path(output_dir: Path, filename: str) -> Path:
         if not candidate.exists():
             return candidate
         idx += 1
+
+
+def find_qr_page_markers(doc: fitz.Document) -> list[tuple[int, str, str]]:
+    markers: list[tuple[int, str, str]] = []
+
+    for page_index in range(doc.page_count):
+        code, qr_raw = extract_code_from_page(doc[page_index])
+        if code:
+            markers.append((page_index, code, qr_raw))
+
+    return markers
 
 
 def process_pdf(pdf_path: str) -> None:
@@ -180,23 +208,45 @@ def process_pdf(pdf_path: str) -> None:
 
     doc = fitz.open(pdf_file)
     try:
-        if doc.page_count < 2:
+        if doc.page_count < 1:
             print(f"[실패] 페이지 수 부족: {pdf_file.name}")
             return
 
-        first_page = doc[0]
-        code, qr_raw = extract_code_from_first_page(first_page)
-        print(f"[QR] {pdf_file.name}: {repr(qr_raw)}")
-
-        if not code:
+        markers = find_qr_page_markers(doc)
+        if not markers:
             print(f"[건너뜀] QR 코드 추출 실패: {pdf_file.name}")
             return
 
-        new_name = code_to_filename(code) + ".pdf"
-        output_pdf = build_unique_output_path(output_dir, new_name)
+        for page_index, _, qr_raw in markers:
+            print(f"[QR] {pdf_file.name} / page {page_index + 1}: {repr(qr_raw)}")
 
-        save_pdf_without_first_page(doc, output_pdf)
-        print(f"[완료] {pdf_file.name} -> {output_pdf.name} / 추출코드: {code}")
+        saved_count = 0
+        for marker_index, (qr_page_index, code, _) in enumerate(markers):
+            body_start = qr_page_index + 1
+            if marker_index + 1 < len(markers):
+                body_end = markers[marker_index + 1][0] - 1
+            else:
+                body_end = doc.page_count - 1
+
+            if body_start > body_end:
+                print(
+                    f"[건너뜀] 본문 페이지 없음: {pdf_file.name} / "
+                    f"QR page {qr_page_index + 1} / 추출코드: {code}"
+                )
+                continue
+
+            new_name = code_to_filename(code) + ".pdf"
+            output_pdf = build_unique_output_path(output_dir, new_name)
+            save_pdf_page_range(doc, body_start, body_end, output_pdf)
+
+            print(
+                f"[완료] {pdf_file.name} -> {output_pdf.name} / 추출코드: {code} / "
+                f"저장페이지: {body_start + 1}-{body_end + 1}"
+            )
+            saved_count += 1
+
+        if saved_count == 0:
+            print(f"[건너뜀] 저장할 본문 페이지 없음: {pdf_file.name}")
     finally:
         doc.close()
 
