@@ -5,3 +5,5 @@ dist/
 output/
 temp_run/
 test.pdf
+machine_id.txt
+pending_logs/
